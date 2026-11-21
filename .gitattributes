@@ -1,0 +1,3 @@
+# keep scripts runnable on Linux/macOS
+system/run text eol=lf
+*.py text eol=lf
