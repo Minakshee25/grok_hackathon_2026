@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Alert-closing system.
+
+Usage:  system/run <institution folder> <output file>
+
+Reads only the institution folder, writes only the output file (and an LLM
+answer cache inside system/.cache when a language model is used).
+"""
+import json
+import os
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "lib"))
+
+from tmdata import Case, Institution          # noqa: E402
+from tmllm import Reader                       # noqa: E402
+from tmoutput import build_line, check_line, fallback_line  # noqa: E402
+from tmrules import decide                     # noqa: E402
+
+
+def main(argv):
+    if len(argv) != 3:
+        sys.stderr.write("usage: run <institution folder> <output file>\n")
+        return 2
+    folder, out_path = os.path.abspath(argv[1]), os.path.abspath(argv[2])
+    t0 = time.time()
+    inst = Institution(folder)
+    known = inst.known_ids()
+    reader = Reader()
+    lines, problems = [], 0
+    for row in inst.cases:
+        case = Case(inst, row)
+        try:
+            verdict, main_f, extra = decide(case, reader)
+            line = build_line(case, verdict, main_f, extra, known)
+            errs = check_line(line, case, known)
+            if errs:
+                raise ValueError("; ".join(errs))
+        except Exception as exc:  # never leave a case out: escalate it instead
+            problems += 1
+            sys.stderr.write("case %s: %s\n" % (row.get("case_id"), exc))
+            line = fallback_line(case, str(exc))
+        lines.append(line)
+    reader.save()
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
+        for line in lines:
+            fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+    counts = {}
+    for line in lines:
+        counts[line["verdict"]] = counts.get(line["verdict"], 0) + 1
+    sys.stderr.write("%s: %d cases -> %s | %s | fallbacks %d | llm calls %d | %.1fs\n" % (
+        inst.name, len(lines), out_path, counts, problems, reader.calls, time.time() - t0))
+    if reader.last_error:
+        sys.stderr.write("llm: %d failed call(s); last error: %s\n" % (reader.failures, reader.last_error))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
